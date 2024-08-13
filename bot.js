@@ -13,29 +13,15 @@ const port = process.env.PORT || 3000;
 
 const bot = new TelegramBot(token, { polling: true });
 
-// Keep track of fetched tokens and traded tokens
+// Set to keep track of fetched tokens and their mint addresses
 const fetchedTokens = new Set();
-const tradedTokens = new Set();
-let solPrice = 0;
 
-// Function to fetch the current SOL price
-const fetchSolPrice = async () => {
-    try {
-        const response = await axios.get('https://frontend-api.pump.fun/sol-price');
-        solPrice = response.data.solPrice;
-        console.log('Current SOL Price:', solPrice);
-    } catch (error) {
-        console.error('Error fetching SOL price:', error);
-    }
-};
-
-// Function to format the market cap in USD
-const formatMarketCap = (marketCapInSol) => {
-    const marketCapInUsd = marketCapInSol * solPrice;
-    if (marketCapInUsd < 1_000) return `$${marketCapInUsd.toFixed(2)}`;
-    if (marketCapInUsd < 1_000_000) return `$${(marketCapInUsd / 1_000).toFixed(2)}k`;
-    if (marketCapInUsd < 1_000_000_000) return `$${(marketCapInUsd / 1_000_000).toFixed(2)}M`;
-    return `$${(marketCapInUsd / 1_000_000_000).toFixed(2)}B`;
+// Function to format market cap in USD
+const formatMarketCap = (marketCap) => {
+    if (marketCap < 1_000) return `$${marketCap.toFixed(2)}`;
+    if (marketCap < 1_000_000) return `$${(marketCap / 1_000).toFixed(2)}k`;
+    if (marketCap < 1_000_000_000) return `$${(marketCap / 1_000_000).toFixed(2)}M`;
+    return `$${(marketCap / 1_000_000_000).toFixed(2)}B`;
 };
 
 // Function to fetch new tokens
@@ -48,75 +34,78 @@ const fetchNewTokens = async () => {
         if (!fetchedTokens.has(tokenData.mint)) {
             fetchedTokens.add(tokenData.mint); // Mark this token as fetched
 
-            const marketCapInSol = tokenData.market_cap; // Assuming market_cap is in SOL
-            const formattedMarketCap = formatMarketCap(marketCapInSol);
+            // Display fetched token information in console
+            console.log(`🔔 New Fetched Token: ${tokenData.name} (${tokenData.symbol})`);
+            console.log(`Mint Address: ${tokenData.mint}`);
 
-            if (marketCapInSol >= 10000) {
-                const message = `🚀 New Token: ${tokenData.name} (${tokenData.symbol}) has reached a market cap of ${formattedMarketCap}!`;
-                await bot.sendMessage(chatId, message);
-                console.log('Notification sent for new token:', message);
-            } else {
-                console.log(`New token ${tokenData.name} is below 10k market cap: ${formattedMarketCap}`);
-            }
+            // Immediately check the market cap for this new token
+            await checkMarketCap(tokenData.mint);
         }
+
+        // Call fetchNewTokens recursively to keep fetching new tokens
+        setImmediate(fetchNewTokens);
     } catch (error) {
         console.error('Error fetching new tokens:', error);
+        // Optionally set a delay before retrying
+        setTimeout(fetchNewTokens, 5000); // Retry after 5 seconds
     }
 };
 
-// Function to check trades for fetched tokens and their market caps
-const checkTokenTrades = async () => {
+// Function to check market cap of a token using its mint address
+const checkMarketCap = async (mintAddress) => {
     try {
-        const response = await axios.get('https://frontend-api.pump.fun/trades/latest');
-        const tradeData = response.data;
+        const tradesResponse = await axios.get('https://frontend-api.pump.fun/trades/latest');
+        const tradesData = tradesResponse.data;
 
-        // Track the mint address of the traded token
-        const tokenMint = tradeData.mint;
+        // Log the structure of tradesData for debugging
+        console.log('Trades Data:', tradesData);
 
-        // If the token mint is in fetchedTokens, check its market cap
-        if (fetchedTokens.has(tokenMint) && !tradedTokens.has(tokenMint)) {
-            tradedTokens.add(tokenMint); // Mark this token as traded
+        // If tradesData is not an array, handle it accordingly
+        if (!Array.isArray(tradesData)) {
+            console.error('Expected tradesData to be an array, but got:', tradesData);
+            return; // Exit the function if data is not in the expected format
+        }
 
-            // Fetch the token data to get the market cap
-            const tokenResponse = await axios.get(`https://frontend-api.pump.fun/coins/latest?mint=${tokenMint}`);
-            const tokenDetails = tokenResponse.data;
+        // Find the trade for the specific mint address
+        const tokenTrade = tradesData.find(trade => trade.mint === mintAddress);
 
-            const marketCapInSol = tokenDetails.market_cap; // Assuming market_cap is in SOL
+        if (tokenTrade) {
+            // Assuming market_cap is calculated based on some logic with the trade data
+            const marketCapInSol = tokenTrade.sol_amount * (await getSolPrice());
             const formattedMarketCap = formatMarketCap(marketCapInSol);
 
-            const message = `🛒 Trade Alert:\nToken: ${tokenDetails.name} (${tokenDetails.symbol})\nMarket Cap: ${formattedMarketCap}\nAmount Sold: ${tradeData.token_amount}\nSOL Amount: ${tradeData.sol_amount}`;
-            await bot.sendMessage(chatId, message);
-            console.log('Trade update sent:', message);
+            // Display market cap information in console
+            console.log(`🔄 Updated Trade for ${mintAddress}: Market Cap is now ${formattedMarketCap}`);
+
+            // Send market cap notification to Telegram if it meets the threshold
+            if (marketCapInSol >= 10000) {
+                const message = `📈 Token has reached a market cap of ${formattedMarketCap}\nMint Address: [${mintAddress}](https://explorer.pump.fun/address/${mintAddress})`;
+                await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+                console.log('Market cap notification sent:', message);
+            }
+        } else {
+            console.log(`No trade found for mint address: ${mintAddress}`);
         }
     } catch (error) {
-        console.error('Error fetching trade data or token details:', error);
+        console.error('Error checking market cap:', error);
     }
 };
 
-// Check for new tokens every minute
-setInterval(fetchNewTokens, 60 * 1000);
+// Function to get the current SOL price
+const getSolPrice = async () => {
+    try {
+        const response = await axios.get('https://frontend-api.pump.fun/sol-price');
+        return response.data.solPrice;
+    } catch (error) {
+        console.error('Error fetching SOL price:', error);
+        return 0; // Return a default value if there's an error
+    }
+};
 
-// Check for new trades every minute
-setInterval(checkTokenTrades, 60 * 1000);
-
-// Fetch the current SOL price initially and then every hour
-fetchSolPrice();
-setInterval(fetchSolPrice, 60 * 60 * 1000); // Fetch SOL price every hour
-
-// Respond to the /start command
-bot.onText(/\/start/, (msg) => {
-    bot.sendMessage(msg.chat.id, 'Bot is running and will notify you about new tokens and trades!');
-});
+// Start fetching new tokens immediately
+fetchNewTokens();
 
 // Express server to keep the bot alive on Back4App
 const app = express();
-
-// Create a ping endpoint
-app.get('/ping', (req, res) => {
-    res.send('Bot is running');
-});
-
-// Start the Express server
-app.listen(port, () => {
-    console.log(`Server is running on port ${port}`);
-});
+app.get('/', (req, res) => res.send('Bot is running!'));
+app.listen(port, () => console.log(`Server is running on port ${port}`));
